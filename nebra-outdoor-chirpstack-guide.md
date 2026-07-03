@@ -2,7 +2,12 @@
 
 Convert a **Nebra Outdoor Helium Hotspot (Gen 1, CM3-based)** into a production LoRaWAN gateway running **Raspberry Pi OS + ChirpStack Concentratord + MQTT Forwarder**.
 
-> **Why this guide exists:** The Nebra Outdoor uses completely non-standard concentrator wiring that is documented *only* in Nebra's own `hm-pyhelper` Python library — not in any ChirpStack documentation, forum thread, or hardware datasheet. Without these settings, the concentrator returns `chip version is 0x00` and `lgw_start failed` no matter what module, software, or config you use.
+> **Why this guide exists:**
+>
+> 1. **These units are flooding the secondhand market.** Nebra is no longer an active presence in the Helium ecosystem, and with Helium mining economics long past their peak, Nebra Outdoor hotspots are increasingly available cheap on eBay, Facebook Marketplace, and surplus channels — often for less than the cost of the enclosure and PoE hardware alone.
+> 2. **Used units are difficult to keep on (or return to) the Helium network.** Hotspot ownership is bound to the original owner's Helium wallet and the onboarding/ECC key; transferring a secondhand unit requires the seller's cooperation, maker-app support, and fees — and with the manufacturer effectively gone, re-onboarding support is unreliable to nonexistent. For most used units, private LoRaWAN is the realistic second life.
+> 3. **The hardware is genuinely good** — weatherproof IP67 enclosure, PoE, CM3 compute, mPCIe concentrator slot — a solid foundation for a private ChirpStack gateway.
+> 4. **The required settings are documented nowhere obvious.** The Nebra Outdoor uses completely non-standard concentrator wiring, documented *only* in Nebra's own `hm-pyhelper` Python library — not in any ChirpStack documentation, forum thread, or hardware datasheet. Without these settings, the concentrator returns `chip version is 0x00` and `lgw_start failed` no matter what module, software, or config you use.
 
 ---
 
