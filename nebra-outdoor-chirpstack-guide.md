@@ -74,27 +74,18 @@ ls /dev/spidev*
 # Expect: /dev/spidev0.0  /dev/spidev0.1  /dev/spidev1.0  /dev/spidev1.1  /dev/spidev1.2
 ```
 
-### 3. Install ChirpStack Repo
+### 3. Install ChirpStack Concentratord (SX1302)
 
-Modern releases ship as `.deb` (handles user creation + systemd service):
+Concentratord ships as a standalone `.deb` on the ChirpStack artifacts server (it is **not** the `chirpstack` apt package — that's the full network server and does not belong on the gateway):
 
 ```bash
-# Make sure gpg is installed
-sudo apt install gpg
-
-# Add the ChirpStack signing key
-sudo mkdir -p /etc/apt/keyrings/
-sudo sh -c 'wget -q -O - https://artifacts.chirpstack.io/packages/chirpstack.key | gpg --dearmor > /etc/apt/keyrings/chirpstack.gpg'
-
-# Add the repo
-echo "deb [signed-by=/etc/apt/keyrings/chirpstack.gpg] https://artifacts.chirpstack.io/packages/4.x/deb stable main" | sudo tee /etc/apt/sources.list.d/chirpstack.list
-
-# Install
-sudo apt update
-sudo apt install chirpstack
+curl -sL https://artifacts.chirpstack.io/downloads/chirpstack-concentratord/chirpstack-concentratord-sx1302_4.7.1_linux_arm64.deb -o /tmp/concentratord.deb
+sudo dpkg -i /tmp/concentratord.deb
 ```
 
 > Check [artifacts.chirpstack.io/downloads/chirpstack-concentratord/](https://artifacts.chirpstack.io/downloads/chirpstack-concentratord/) for the current version.
+
+The package's `preinst` script creates the `chirpstack` system user if it doesn't already exist (the MQTT Forwarder deb carries the identical script, so install order between the two doesn't matter — whichever lands first creates the user).
 
 Add hardware group permissions (required or you get `setup reset pins error: Permission denied`):
 ```bash
@@ -103,7 +94,22 @@ sudo usermod -aG spi,gpio,dialout chirpstack
 
 ### 4. Configure Concentratord
 
-`/etc/chirpstack-concentratord/chirpstack-concentratord.toml` (US915 FSB2 shown):
+The deb installs **three** config files to `/etc/chirpstack-concentratord-sx1302/`, and the systemd unit loads all of them, merged in this order:
+
+```
+concentratord.toml  →  channels.toml  →  region.toml
+```
+
+> ⚠️ **Merge-order gotcha:** the shipped `channels.toml` and `region.toml` defaults are **EU868**, and because they load *after* `concentratord.toml`, they silently override any US915 settings you put in the main file. Either blank them (single-file approach below) or put your channel plan in `channels.toml` itself. Symptom of getting this wrong: concentratord starts cleanly but listens on EU868 frequencies and never hears your devices.
+
+Single-file approach — blank the region/channel files and keep everything in `concentratord.toml`:
+
+```bash
+sudo truncate -s0 /etc/chirpstack-concentratord-sx1302/channels.toml
+sudo truncate -s0 /etc/chirpstack-concentratord-sx1302/region.toml
+```
+
+`/etc/chirpstack-concentratord-sx1302/concentratord.toml` (US915 FSB2 shown):
 
 ```toml
 [concentratord]
@@ -159,8 +165,8 @@ Notes:
 ### 5. Start and verify
 
 ```bash
-sudo systemctl restart chirpstack-concentratord
-sudo journalctl -u chirpstack-concentratord -f --no-pager
+sudo systemctl restart chirpstack-concentratord-sx1302
+sudo journalctl -u chirpstack-concentratord-sx1302 -f --no-pager
 ```
 
 **Success looks like:**
@@ -181,10 +187,17 @@ Record the Gateway ID — it is read from the SX1302 chip and is what you regist
 
 ### 6. Install and configure MQTT Forwarder
 
+The MQTT Forwarder *is* published in the ChirpStack apt repository, so add the repo and install from there:
+
 ```bash
+# Add the ChirpStack signing key
 sudo mkdir -p /etc/apt/keyrings
 sudo curl -fsSL https://artifacts.chirpstack.io/packages/chirpstack.key | gpg --dearmor | sudo tee /etc/apt/keyrings/chirpstack.gpg > /dev/null
+
+# Add the repo
 echo "deb [signed-by=/etc/apt/keyrings/chirpstack.gpg] https://artifacts.chirpstack.io/packages/4.x/deb stable main" | sudo tee /etc/apt/sources.list.d/chirpstack.list
+
+# Install
 sudo apt update
 sudo apt install -y chirpstack-mqtt-forwarder
 ```
@@ -247,10 +260,12 @@ Uplink frames from in-range LoRa devices appear in the journal as `Received upli
 | No `/dev/spidev1.2` | Missing overlay | `dtoverlay=spi1-3cs` in `/boot/firmware/config.txt` + reboot |
 | `setup reset pins error: Permission denied` | chirpstack user lacks GPIO access | `sudo usermod -aG spi,gpio,dialout chirpstack` + restart service |
 | Channels all `enabled: false, freq: 0` | Missing `[gateway.concentrator]` section | Add explicit channel plan (see config above) |
+| Starts clean but listens on EU868 / no uplinks | Shipped `channels.toml`/`region.toml` (EU868 defaults) load *after* `concentratord.toml` and override it | Blank both files (`sudo truncate -s0 ...`) or put the US915 plan in `channels.toml` |
 | `gateway_id must be exactly 8 bytes` (older builds) | Empty `gateway_id=""` on 4.5.x sx1301 builds | Omit the field or use 16 hex chars; not an issue on 4.7.x sx1302 |
 | No Ethernet under ChirpStack Gateway OS | OpenWrt lacks Exar USB-Ethernet driver | Use Raspberry Pi OS instead |
 | Works in MNTD Blackspot but not Nebra | Different wiring per board | MNTD: spidev0.0 + GPIO25. Nebra Outdoor: spidev1.2 + GPIO38 |
 | Forwarder sends OK, but gateway "Never seen" in ChirpStack | `topic_prefix` includes `/gateway` (doubled topic segment) | Set `topic_prefix` to region id only (e.g. `us915`); verify topic in journal reads `us915/gateway/EUI/event/stats` |
+| Web UI / Postgres errors on the gateway itself | `sudo apt install chirpstack` was run — that's the full network server, not the gateway daemon | `sudo apt remove chirpstack`; install `chirpstack-concentratord-sx1302` (step 3) |
 
 ## Board-to-Settings Cheat Sheet (Helium salvage hardware)
 
