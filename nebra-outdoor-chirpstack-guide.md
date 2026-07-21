@@ -100,7 +100,7 @@ The deb installs **three** config files to `/etc/chirpstack-concentratord-sx1302
 concentratord.toml  →  channels.toml  →  region.toml
 ```
 
-> ⚠️ **Merge-order gotcha:** the shipped `channels.toml` and `region.toml` defaults are **EU868**, and because they load *after* `concentratord.toml`, they silently override any US915 settings you put in the main file. Either blank them (single-file approach below) or put your channel plan in `channels.toml` itself. Symptom of getting this wrong: concentratord starts cleanly but listens on EU868 frequencies and never hears your devices.
+> ⚠️ **Multi-file gotcha:** the three `-c` files are **concatenated and parsed as a single TOML document** — not merged. The shipped `channels.toml` and `region.toml` contain EU868 defaults, so if you put a full config in `concentratord.toml` and leave the other two populated, the duplicated `[gateway.concentrator]` table causes a hard startup panic: `Error parsing config file: ... "duplicate key"`. Blank **both** files (single-file approach below) — blanking only one still crashes. After fixing, you may also need `sudo systemctl reset-failed chirpstack-concentratord-sx1302` to clear systemd's rapid-restart lockout (`Start request repeated too quickly`).
 
 Single-file approach — blank the region/channel files and keep everything in `concentratord.toml`:
 
@@ -252,6 +252,81 @@ Uplink frames from in-range LoRa devices appear in the journal as `Received upli
 
 ---
 
+## Optional: mTLS Gateway Authentication
+
+The basic setup above works with an open (or username/password) broker listener. For production fleets, mutual TLS is the better model — each gateway authenticates with its own client certificate instead of shared credentials, and certificates can be individually revoked.
+
+### Prerequisites
+
+- Broker's TLS listener configured to require client certificates (Mosquitto: `require_certificate true` + `cafile` pointing at your CA on the 8883 listener)
+- Three files per gateway: CA certificate, gateway client certificate, gateway private key
+  - ChirpStack's UI can generate these per-gateway (gateway page → certificate generation) using its internal CA — the PEM blocks are shown **once**, so save them immediately. Bonus: the cert CN is the gateway EUI, enabling per-gateway Mosquitto topic ACLs.
+  - Or use your own CA (openssl, step-ca, etc.)
+
+### Install certificates on the gateway
+
+```bash
+sudo mkdir -p /etc/chirpstack-mqtt-forwarder/certs
+# copy ca.crt, gateway-<EUI>.crt, gateway-<EUI>.key into that directory, then:
+sudo chown -R chirpstack:chirpstack /etc/chirpstack-mqtt-forwarder/certs
+sudo chmod 600 /etc/chirpstack-mqtt-forwarder/certs/*.key
+sudo chmod 644 /etc/chirpstack-mqtt-forwarder/certs/*.crt
+```
+
+> Ownership matters: the forwarder runs as the `chirpstack` user (check with `grep User /lib/systemd/system/chirpstack-mqtt-forwarder.service`). A key that is `chmod 600` but owned by root fails with `Open private key: Permission denied`.
+
+### Update the forwarder config
+
+Add the three TLS paths to the existing `[mqtt]` section — **do not remove the `[backend]` sections**:
+
+```toml
+[backend]
+enabled = "concentratord"
+
+[backend.concentratord]
+event_url = "ipc:///tmp/concentratord_event"
+command_url = "ipc:///tmp/concentratord_command"
+
+[mqtt]
+server = "mqtts://YOUR-BROKER:8883"
+topic_prefix = "us915"
+qos = 0
+clean_session = true
+keep_alive_interval = "30s"
+json = false
+
+ca_cert = "/etc/chirpstack-mqtt-forwarder/certs/ca.crt"
+tls_cert = "/etc/chirpstack-mqtt-forwarder/certs/gateway-<EUI>.crt"
+tls_key = "/etc/chirpstack-mqtt-forwarder/certs/gateway-<EUI>.key"
+```
+
+> `ca_cert` note: this is the CA used to validate the **broker's server certificate**. If the broker cert is from a public CA (e.g. Let's Encrypt) and only your client certs are private-CA, leave `ca_cert` unset — the system trust store handles server validation.
+
+### Restart and verify
+
+```bash
+sudo systemctl reset-failed chirpstack-mqtt-forwarder
+sudo systemctl restart chirpstack-mqtt-forwarder
+sudo journalctl -u chirpstack-mqtt-forwarder -f --no-pager
+```
+
+Success logs `Configuring client with TLS certificate, ...` followed by a normal MQTT connection and stats publishes; the gateway's "Last seen" resumes updating in ChirpStack.
+
+### mTLS troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Forwarder starts but logs show UDP / port 1700 activity, no MQTT | `[backend]` sections removed while editing — forwarder silently falls back to Semtech UDP mode | Restore `[backend]` + `[backend.concentratord]` sections |
+| `No such file or directory` on a cert path | Filename mismatch between config and disk (classic: `ca.cert` vs `ca.crt`) | Make `ca_cert`/`tls_cert`/`tls_key` paths match actual filenames exactly |
+| `Open private key: Permission denied` | Key is `chmod 600` but owned by root, service runs as `chirpstack` | `sudo chown chirpstack:chirpstack` on the certs directory |
+| Panic: `Setup MQTT client error: peer sent no certificates` | Wrong/mismatched cert + key pair, or invalid PEM files | Re-download the pair for this gateway's EUI; verify match: `openssl x509 -noout -modulus -in cert \| openssl md5` vs same on the key |
+| `Start request repeated too quickly` after fixing config | systemd rapid-restart lockout from the failed attempts | `sudo systemctl reset-failed chirpstack-mqtt-forwarder` then restart |
+| TLS handshake rejected by broker | Broker's `cafile` doesn't include the CA that signed the client cert, or `require_certificate` misconfigured | Verify broker listener config; test with `mosquitto_pub` using the same cert/key |
+
+> Cert lifecycle reminder: ChirpStack-issued gateway certs expire. Track expiry dates (`openssl x509 -noout -enddate -in cert`) — an expired client cert presents as sudden handshake failures on a previously working gateway. Also note the EUI is read from the SX1302 chip, so swapping the concentrator module changes the EUI and requires a new gateway registration + new certs.
+
+---
+
 ## Troubleshooting Quick Reference
 
 | Symptom | Cause | Fix |
@@ -260,7 +335,7 @@ Uplink frames from in-range LoRa devices appear in the journal as `Received upli
 | No `/dev/spidev1.2` | Missing overlay | `dtoverlay=spi1-3cs` in `/boot/firmware/config.txt` + reboot |
 | `setup reset pins error: Permission denied` | chirpstack user lacks GPIO access | `sudo usermod -aG spi,gpio,dialout chirpstack` + restart service |
 | Channels all `enabled: false, freq: 0` | Missing `[gateway.concentrator]` section | Add explicit channel plan (see config above) |
-| Starts clean but listens on EU868 / no uplinks | Shipped `channels.toml`/`region.toml` (EU868 defaults) load *after* `concentratord.toml` and override it | Blank both files (`sudo truncate -s0 ...`) or put the US915 plan in `channels.toml` |
+| Panic: `Error parsing config file: ... "duplicate key"` | Full config in `concentratord.toml` while shipped `channels.toml`/`region.toml` (EU868 defaults) still populated — files are concatenated, so tables collide | Blank **both** files (`sudo truncate -s0 ...`), then `systemctl reset-failed` + restart |
 | `gateway_id must be exactly 8 bytes` (older builds) | Empty `gateway_id=""` on 4.5.x sx1301 builds | Omit the field or use 16 hex chars; not an issue on 4.7.x sx1302 |
 | No Ethernet under ChirpStack Gateway OS | OpenWrt lacks Exar USB-Ethernet driver | Use Raspberry Pi OS instead |
 | Works in MNTD Blackspot but not Nebra | Different wiring per board | MNTD: spidev0.0 + GPIO25. Nebra Outdoor: spidev1.2 + GPIO38 |
