@@ -74,13 +74,24 @@ ls /dev/spidev*
 # Expect: /dev/spidev0.0  /dev/spidev0.1  /dev/spidev1.0  /dev/spidev1.1  /dev/spidev1.2
 ```
 
-### 3. Install ChirpStack Concentratord (SX1302)
+### 3. Install ChirpStack Repo
 
 Modern releases ship as `.deb` (handles user creation + systemd service):
 
 ```bash
-curl -sL https://artifacts.chirpstack.io/downloads/chirpstack-concentratord/chirpstack-concentratord-sx1302_4.7.1_linux_arm64.deb -o /tmp/concentratord.deb
-sudo dpkg -i /tmp/concentratord.deb
+# Make sure gpg is installed
+sudo apt install gpg
+
+# Add the ChirpStack signing key
+sudo mkdir -p /etc/apt/keyrings/
+sudo sh -c 'wget -q -O - https://artifacts.chirpstack.io/packages/chirpstack.key | gpg --dearmor > /etc/apt/keyrings/chirpstack.gpg'
+
+# Add the repo
+echo "deb [signed-by=/etc/apt/keyrings/chirpstack.gpg] https://artifacts.chirpstack.io/packages/4.x/deb stable main" | sudo tee /etc/apt/sources.list.d/chirpstack.list
+
+# Install
+sudo apt update
+sudo apt install chirpstack
 ```
 
 > Check [artifacts.chirpstack.io/downloads/chirpstack-concentratord/](https://artifacts.chirpstack.io/downloads/chirpstack-concentratord/) for the current version.
